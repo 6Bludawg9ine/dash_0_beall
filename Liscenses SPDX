@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/utils/Create2.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+
+/**
+ * @title dash_0_beall
+ * @notice Monetized CREATE2 deployment factory with caller-bound salt scoping 
+ *         and an automated deployment fee model for commercial use.
+ */
+contract dash_0_beall is Ownable, Pausable {
+
+    /// @notice Fee required to deploy a contract through this factory (in wei).
+    uint256 public deploymentFee;
+
+    event ContractDeployed(
+        address indexed deployedAddress, 
+        address indexed caller, 
+        bytes32 userSalt,
+        uint256 feePaid
+    );
+    
+    event DeploymentFeeUpdated(uint256 newFee);
+    event FeesWithdrawn(address indexed recipient, uint256 amount);
+
+    /**
+     * @param initialOwner Address of the contract administrator.
+     * @param initialFee Required fee per deployment (set in wei, e.g., 0.01 ether).
+     */
+    constructor(address initialOwner, uint256 initialFee) Ownable(initialOwner) {
+        deploymentFee = initialFee;
+    }
+
+    /**
+     * @dev Computes a scoped salt bound to the caller's address.
+     */
+    function getScopedSalt(address caller, bytes32 userSalt) public pure returns (bytes32) {
+        return keccak256(abi.encodePacked(caller, userSalt));
+    }
+
+    /**
+     * @notice Deploys a contract using CREATE2 with caller-bound salt scoping.
+     * @param value Amount of Ether intended for the created contract's constructor.
+     * @param userSalt Arbitrary bytes32 salt chosen by caller.
+     * @param bytecode Full creation code (initcode + encoded constructor arguments).
+     * @return deployedAddress The deterministic address of the newly deployed contract.
+     */
+    function deploy(
+        uint256 value,
+        bytes32 userSalt,
+        bytes memory bytecode
+    ) external payable whenNotPaused returns (address deployedAddress) {
+        // Enforce deployment fee + value passed to constructor
+        require(msg.value >= value + deploymentFee, "dash_0_beall: Insufficient fee or value supplied");
+
+        bytes32 scopedSalt = getScopedSalt(msg.sender, userSalt);
+        deployedAddress = Create2.deploy(value, scopedSalt, bytecode);
+
+        emit ContractDeployed(deployedAddress, msg.sender, userSalt, deploymentFee);
+    }
+
+    /**
+     * @notice Predicts the exact contract address prior to deployment.
+     */
+    function computeAddress(
+        address caller,
+        bytes32 userSalt,
+        bytes32 bytecodeHash
+    ) external view returns (address) {
+        bytes32 scopedSalt = getScopedSalt(caller, userSalt);
+        return Create2.computeAddress(scopedSalt, bytecodeHash, address(this));
+    }
+
+    /**
+     * @notice Updates the deployment fee charged by the factory.
+     * @param newFee Fee amount in wei.
+     */
+    function setDeploymentFee(uint256 newFee) external onlyOwner {
+        deploymentFee = newFee;
+        emit DeploymentFeeUpdated(newFee);
+    }
+
+    /**
+     * @notice Withdraws accumulated factory revenue to the owner.
+     * @param recipient Target payout address.
+     */
+    function withdrawFees(address payable recipient) external onlyOwner {
+        require(recipient != address(0), "dash_0_beall: Invalid recipient");
+        uint256 balance = address(this).balance;
+        require(balance > 0, "dash_0_beall: No fees available");
+
+        (bool success, ) = recipient.call{value: balance}("");
+        require(success, "dash_0_beall: ETH transfer failed");
+
+        emit FeesWithdrawn(recipient, balance);
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    receive() external payable {}
+}
