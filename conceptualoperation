@@ -1,0 +1,92 @@
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/utils/Create2.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+
+/**
+ * @title dash_0_beall
+ * @notice Hardened CREATE2 deployment factory designed to defeat mempool salt-jacking 
+ *         and front-running by cryptographically binding the deployment salt to msg.sender.
+ */
+contract dash_0_beall is Ownable, Pausable {
+
+    /// @notice Emitted when a contract is successfully deployed.
+    /// @param deployedAddress The computed target address of the new contract.
+    /// @param caller The address that initiated the deployment.
+    /// @param userSalt The caller-defined salt component.
+    event ContractDeployed(
+        address indexed deployedAddress, 
+        address indexed caller, 
+        bytes32 userSalt
+    );
+
+    constructor(address initialOwner) Ownable(initialOwner) {}
+
+    /**
+     * @dev Computes a scoped salt bound to the caller's address.
+     *      Even if a bot copies raw calldata from the public mempool, their msg.sender 
+     *      will differ, forcing their attempt into a completely different address.
+     */
+    function getScopedSalt(address caller, bytes32 userSalt) public pure returns (bytes32) {
+        return keccak256(abi.encodePacked(caller, userSalt));
+    }
+
+    /**
+     * @notice Deploys a contract using CREATE2 with caller-bound salt scoping.
+     * @param value Amount of Ether (in wei) to pass to the target contract constructor.
+     * @param userSalt Arbitrary bytes32 salt chosen by caller.
+     * @param bytecode Full creation code (initcode + encoded constructor arguments).
+     * @return deployedAddress The deterministic address of the newly deployed contract.
+     */
+    function deploy(
+        uint256 value,
+        bytes32 userSalt,
+        bytes memory bytecode
+    ) external payable whenNotPaused returns (address deployedAddress) {
+        require(msg.value >= value, "dash_0_beall: Insufficient Ether supplied");
+        
+        // Bind caller address into internal deployment salt
+        bytes32 scopedSalt = getScopedSalt(msg.sender, userSalt);
+
+        // Execute CREATE2
+        deployedAddress = Create2.deploy(value, scopedSalt, bytecode);
+
+        emit ContractDeployed(deployedAddress, msg.sender, userSalt);
+    }
+
+    /**
+     * @notice Predicts the exact contract address off-chain or on-chain prior to deployment.
+     * @param caller Address that will execute the deployment call.
+     * @param userSalt Arbitrary bytes32 salt chosen by caller.
+     * @param bytecodeHash Hash of the contract creation code (keccak256(bytecode)).
+     * @return The calculated target address.
+     */
+    function computeAddress(
+        address caller,
+        bytes32 userSalt,
+        bytes32 bytecodeHash
+    ) external view returns (address) {
+        bytes32 scopedSalt = getScopedSalt(caller, userSalt);
+        return Create2.computeAddress(scopedSalt, bytecodeHash, address(this));
+    }
+
+    /**
+     * @notice Allows owner to pause factory creation during emergencies.
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /**
+     * @notice Allows owner to resume factory creation.
+     */
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    /**
+     * @dev Allows factory to hold ETH for constructor value deployments.
+     */
+    receive() external payable {}
+}
